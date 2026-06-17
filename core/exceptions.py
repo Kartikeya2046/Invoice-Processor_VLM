@@ -1,0 +1,2 @@
+class DocumentUnknownError(Exception):
+    pass
