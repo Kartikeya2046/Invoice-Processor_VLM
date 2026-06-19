@@ -1,3 +1,4 @@
+# pyrefly: ignore [missing-import]
 import httpx
 import asyncio
 import logging
@@ -26,7 +27,8 @@ class SLMClient:
             ],
             "stream": False,
             "options": {
-                "temperature": 0.1
+                "temperature": 0.1,
+                "num_predict": 400
             }
         }
 
@@ -40,7 +42,7 @@ class SLMClient:
         for attempt in range(1, self.max_retries + 1):
             start_time = time.time()
             try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
+                async with httpx.AsyncClient(timeout=90.0) as client:
                     response = await client.post(url, json=payload, headers=headers)
                     response.raise_for_status()
 
