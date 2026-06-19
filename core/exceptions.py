@@ -3,3 +3,6 @@ class DocumentUnknownError(Exception):
 
 class ExtractionError(Exception):
     pass
+
+class SLMUnavailableError(Exception):
+    pass

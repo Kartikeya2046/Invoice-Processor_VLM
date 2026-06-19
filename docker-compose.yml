@@ -15,6 +15,9 @@ services:
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - VLM_ENDPOINT=http://vllm:8001
       - SECRET_KEY=${SECRET_KEY:-dev_secret_key}
+      - SLM_ENDPOINT=${SLM_ENDPOINT}
+      - SLM_MODEL=${SLM_MODEL:-qwen2.5:3b}
+      - SLM_API_KEY=${SLM_API_KEY:-}
     depends_on:
       - postgres
       - redis
