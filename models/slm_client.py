@@ -8,6 +8,7 @@ from typing import Optional
 
 from core.config import settings
 from core.exceptions import SLMUnavailableError
+from core.json_utils import ExtractionJSONEncoder
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ class SLMClient:
             "model": self.model,
             "messages": [
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": json.dumps(extracted_json)}
+                {"role": "user", "content": json.dumps(extracted_json, cls=ExtractionJSONEncoder)}
             ],
             "stream": False,
             "options": {

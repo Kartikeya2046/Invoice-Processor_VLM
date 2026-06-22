@@ -15,13 +15,45 @@ services:
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - VLM_ENDPOINT=http://vllm:8001
       - SECRET_KEY=${SECRET_KEY:-dev_secret_key}
-      - SLM_ENDPOINT=${SLM_ENDPOINT}
+      - SLM_ENDPOINT=${SLM_ENDPOINT:-https://11434-01kvfdrbbe002xwhcqng7rhh8e.cloudspaces.litng.ai}
       - SLM_MODEL=${SLM_MODEL:-qwen2.5:3b}
       - SLM_API_KEY=${SLM_API_KEY:-}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      - WEBHOOK_MAX_RETRIES=${WEBHOOK_MAX_RETRIES:-4}
+      - WEBHOOK_RETRY_BACKOFF_BASE=${WEBHOOK_RETRY_BACKOFF_BASE:-2.0}
+      - WEBHOOK_TIMEOUT=${WEBHOOK_TIMEOUT:-10.0}
+      - API_KEY=${API_KEY}
     depends_on:
       - postgres
       - redis
     command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: docextract_worker
+    volumes:
+      - .:/app
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres:5432/docextract}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - VLM_ENDPOINT=http://vllm:8001
+      - SECRET_KEY=${SECRET_KEY:-dev_secret_key}
+      - SLM_ENDPOINT=${SLM_ENDPOINT:-https://11434-01kvfdrbbe002xwhcqng7rhh8e.cloudspaces.litng.ai}
+      - SLM_MODEL=${SLM_MODEL:-qwen2.5:3b}
+      - SLM_API_KEY=${SLM_API_KEY:-}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      - WEBHOOK_MAX_RETRIES=${WEBHOOK_MAX_RETRIES:-4}
+      - WEBHOOK_RETRY_BACKOFF_BASE=${WEBHOOK_RETRY_BACKOFF_BASE:-2.0}
+      - WEBHOOK_TIMEOUT=${WEBHOOK_TIMEOUT:-10.0}
+      - API_KEY=${API_KEY}
+    depends_on:
+      - postgres
+      - redis
+    command: celery -A core.celery_app worker --loglevel=info --concurrency=2
 
   postgres:
     image: postgres:16-alpine
