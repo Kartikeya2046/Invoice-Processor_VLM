@@ -1,150 +1,20 @@
 # Agent Handoff — AI Document Extraction System
-
-## Project Overview
-Enterprise pipeline that replaces an old OCR + Mistral approach with a VLM-based document extraction system. The system classifies, extracts, and validates fields from **Invoices** and **Bills of Entry (BOE)** using **Qwen2.5-VL-3B-Instruct (AWQ INT4)** served via vLLM, plus a hybrid rule-based + SLM validation layer, now wired into an async Celery pipeline with webhook delivery.
-
-**Stack:** FastAPI · PostgreSQL · Redis · Celery · vLLM (Qwen2.5-VL-3B AWQ INT4) · Docker Compose · Ollama (remote, Lightning AI)
+**Date:** June 22, 2026
 **Repo:** https://github.com/Kartikeya2046/Invoice-Processor_VLM
 **Branch:** `main`
 
-### Why rebuilt from scratch
-The old OCR + Mistral architecture was tightly coupled — adding new document types or changing extraction logic required touching multiple fragile components at once, with no confidence scoring or structured validation. Rather than patch it, the system was redesigned with independent, replaceable components (classification → extraction → validation → async orchestration).
+---
 
-### Why not LangChain
-The pipeline is a fixed linear sequence (classify → extract → validate) — no need for LangChain's agent/chain abstractions. Direct `httpx` calls to vLLM and Ollama are faster and easier to debug than adding a dependency layer with no functional benefit.
+## Project Overview
+
+Enterprise pipeline that replaces an old OCR + Mistral approach with a VLM-based document extraction system. The system classifies, extracts, and validates fields from **Invoices** and **Bills of Entry (BOE)** using **Qwen2.5-VL-3B-Instruct (AWQ INT4)** served via vLLM, plus a hybrid rule-based + SLM validation layer, wired into an async Celery pipeline with webhook delivery.
+
+**Stack:** FastAPI · PostgreSQL · Redis · Celery · vLLM (Qwen2.5-VL-3B AWQ INT4) · Docker Compose · Ollama (remote, Lightning AI)
 
 ---
 
-## Current Status
+## Build Plan — Final Status
 
-### ✅ Phase 1 — Infrastructure & Scaffold: COMPLETE
-- Docker Compose stack — now 6 containers with the addition of `worker` (see Phase 6)
-- PostgreSQL schema migrated via `database/migrations/001_initial_schema.sql`
-- FastAPI `main.py` with `/health` endpoint working
-
-### ✅ Phase 2 — VLM Integration: COMPLETE
-- `models/vlm_client.py`, `classifiers/vlm_classifier/__init__.py` — all tests pass
-
-### ✅ Phase 3 — Invoice & BOE Extractors: COMPLETE
-- `extractors/invoice/` and `extractors/bill_of_entry/` — all tests pass
-
-### ✅ Phase 5 — Hybrid Validation (Rules + SLM): COMPLETE
-- Rule-based + SLM (Qwen2.5:3b via remote Ollama) validators, merge layer, confidence scoring — all tests pass
-
-### ✅ Phase 6 — FastAPI Routes + Celery Workers: COMPLETE
-**Architecture:** `POST /documents` returns 202 immediately and dispatches a Celery `chain(extract_task, validate_task)`. Each stage updates `documents.status` in Postgres. On completion or failure, `webhook_task` POSTs a result payload to the caller-supplied `callback_url`, with exponential-backoff retry (up to `WEBHOOK_MAX_RETRIES`, base `WEBHOOK_RETRY_BACKOFF_BASE`).
-
-**Why two chained tasks, not one:** extraction (local vLLM, ~5-6s) and validation (remote Ollama on flaky Lightning AI, ~30-90s) have different latency and failure profiles. Chaining them separately means a Lightning AI hiccup doesn't force re-running the GPU-bound extraction, and Flower shows which stage actually failed.
-
-**Built components:**
-- `core/celery_app.py` — flat file, Celery app config. **Autodiscovery was abandoned in favor of explicit imports** (`from tasks import extract_task, validate_task, webhook_task`) — see Key Learnings.
-- `core/db.py` — shared `get_db_url()` (and related DB helpers), extracted out of `tasks/` to break circular imports (see Key Learnings).
-- `core/json_utils.py` — `ExtractionJSONEncoder`, handles `date`/`datetime`/`Decimal` for any manual `json.dumps()` call outside FastAPI's own response serialization.
-- `tasks/extract_task.py`, `tasks/validate_task.py`, `tasks/webhook_task.py` — the three chained/dispatched tasks.
-- `api/routes/documents.py` — `POST /documents`, `GET /documents/review`, `GET /documents/{document_id}`, `GET /documents/{document_id}/status`, registered in that order (specific routes before parameterized).
-- `database/migrations/002_phase6_pipeline.sql` — adds `status`, `callback_url`, `failed_stage`, `failure_reason`, `webhook_delivered`, `webhook_attempts` to `documents`.
-- `docker-compose.yml` — new `worker` service, `celery -A core.celery_app worker --concurrency=2` (concurrency capped deliberately given 6GB VRAM shared with vLLM).
-
-**Test coverage, all independently re-verified against the live stack (not just exit codes — see Key Learnings on what counts as proof):**
-- `scripts/test_celery_chain.py` — full chain through real vLLM + real Lightning AI SLM. Verified pass took 92.32s, with `validate_task` alone logging 87.71s — consistent with known SLM latency, confirming the SLM was actually called rather than short-circuited.
-- `scripts/test_webhook_delivery.py` — dispatches through the **real Docker worker** (not an in-process function call — see Key Learnings on why that doesn't work for retry testing), against a real local listener that fails twice then succeeds. Confirmed 3 real POSTs (500, 500, 200) with measured gaps of 2.06s and 4.06s, matching `WEBHOOK_RETRY_BACKOFF_BASE=2.0` exponential backoff (`2.0×2^0`, `2.0×2^1`) almost exactly. `webhook_attempts=3`, `webhook_delivered=True` confirmed via direct DB read.
-- `scripts/test_route_ordering.py` — confirms `GET /documents/review` resolves to the review handler, not the `{document_id}` parameterized route. Clean pass, 1.00s runtime.
-
----
-
-## Known Issue — Latency (carried forward, now load-bearing rather than theoretical)
-- VLM extraction: ~5-6s/doc (confirmed again in live Phase 6 testing: 2.03s classify + 3.20s extract)
-- SLM validation: 30-90s/call depending on Lightning AI's shared-hardware load (87.71s observed in one real run — higher than the 30-50s range noted in Phase 5, worth monitoring as a range rather than a fixed number)
-- This is **why Phase 6's async design is correct and necessary** — confirmed empirically, not just architecturally: a synchronous request path would mean the client waits up to ~95s+ per document.
-
----
-
-## What's Next — Phase 7: Shadow Mode & Production Cutover
-Not yet scoped. Known open items carried into it:
-- **Confirm Phase 1–5's own test scripts (`test_invoice_extractor.py`, `test_boe_extractor.py`, `test_validators.py`, etc.) still pass against a real, migrated Postgres volume.** Discovered during Phase 6 debugging that the `docextract_postgres` container had **zero tables** — no migration had ever been applied to it — meaning it's unconfirmed whether earlier phases' "all tests passing" claims were ever exercised against a real database, versus mocked DB layers or a different now-gone Postgres volume. This should be checked explicitly before Phase 7's shadow-mode cutover, not discovered mid-cutover.
-- `GET /documents/review`'s actual query against `extractions`/`field_confidences` for `requires_review=True` documents has not yet been exercised with real flagged data end-to-end (the happy-path known-good test fixture used in `test_celery_chain.py` scored 0.9625 confidence and did not require review — worth a dedicated test with a known-bad fixture to confirm the review queue actually surfaces it).
-- Webhook delivery's "after max retries exhausted, log and let it die quietly in Celery's bookkeeping" path (the dead-letter case) has not been tested — only the eventual-success retry path has real evidence behind it.
-
----
-
-## How to Run
-
-```powershell
-cd D:\Downloads\intern\Invoice_Processor_v2\document-extraction
-docker-compose up -d
-docker-compose ps   # confirm all 6 services: api, postgres, redis, flower, vllm, worker
-
-# Phase 6 tests — run from Windows host, need PYTHONPATH and SLM_ENDPOINT set even for
-# tests that mostly talk to the real Docker stack, since Settings() validates eagerly on import
-$env:PYTHONPATH="."
-$env:SLM_ENDPOINT="http://localhost"
-pytest scripts/test_celery_chain.py -v -s          # ~90s+, hits real vLLM + real Ollama
-pytest scripts/test_webhook_delivery.py -v -s      # ~10s, hits real Docker worker
-pytest scripts/test_route_ordering.py -v -s        # ~1s, route resolution only
-
-# Logs
-docker-compose logs -f worker
-docker-compose logs -f api
-```
-
-### ⚠️ Required first step EVERY session: verify Ollama on Lightning AI
-(Unchanged from Phase 5 — see below for a **newly confirmed fourth symptom** of the existing binding-reversion failure mode.)
-
-```bash
-which ollama
-curl http://localhost:11434/api/tags
-ss -tlnp | grep 11434
-```
-
-If bound to `127.0.0.1` instead of `0.0.0.0`:
-```bash
-sudo systemctl edit ollama
-# [Service]
-# Environment="OLLAMA_HOST=0.0.0.0:11434"
-sudo systemctl daemon-reload
-sudo systemctl restart ollama
-sleep 2
-curl http://localhost:11434/api/tags
-```
-
-Then verify the public tunnel:
-```powershell
-curl -v https://11434-01kvfdrbbe002xwhcqng7rhh8e.cloudspaces.litng.ai/api/tags
-```
-
-**Newly observed symptom (Phase 6 session) of the same binding-reversion failure:** a `curl` to the public cloudspace URL can return a clean `HTTP/2 403` with `content-length: 0` — not a timeout, not a connection error — when the underlying binding is `127.0.0.1`-only. This looked at first like a separate Lightning AI access-control/Ports-panel issue, but was fully resolved by the same `OLLAMA_HOST=0.0.0.0:11434` systemd fix already documented above. **Don't chase the Ports panel UI before re-checking the binding** — check `ss -tlnp | grep 11434` from inside the Studio terminal first; a 403 from the public URL is consistent with this same root cause, not necessarily a new one.
-
----
-
-## Folder Structure (relevant Phase 6 additions)
-```
-document-extraction/
-├── core/
-│   ├── celery_app.py            # Celery app — explicit task imports, NOT autodiscover_tasks()
-│   ├── db.py                    # get_db_url(), shared DB helpers — moved here to break circular imports
-│   ├── json_utils.py            # ExtractionJSONEncoder (date/datetime/Decimal)
-│   └── config.py                # Settings — now includes CELERY_BROKER_URL, CELERY_RESULT_BACKEND,
-│                                 #   WEBHOOK_MAX_RETRIES, WEBHOOK_RETRY_BACKOFF_BASE, WEBHOOK_TIMEOUT
-├── tasks/
-│   ├── __init__.py
-│   ├── extract_task.py          # classify+extract via vLLM, chains to validate_task
-│   ├── validate_task.py         # rule+SLM validation via existing Phase 5 validators
-│   └── webhook_task.py          # delivers result/failure payload to callback_url, retries on non-2xx
-├── api/routes/documents.py      # POST /documents, GET /review, GET /{id}, GET /{id}/status
-├── database/migrations/
-│   ├── 001_initial_schema.sql
-│   └── 002_phase6_pipeline.sql  # status, callback_url, failed_stage, failure_reason,
-│                                 #   webhook_delivered, webhook_attempts on documents
-├── scripts/
-│   ├── test_celery_chain.py     # real end-to-end, real vLLM + real Ollama
-│   ├── test_webhook_delivery.py # real worker dispatch + real listener, retry/backoff verified
-│   └── test_route_ordering.py   # FastAPI TestClient, route resolution only
-└── docker-compose.yml           # +worker service, concurrency=2
-```
-
----
-
-## Build Plan Summary
 | Phase | Title | Status |
 |---|---|---|
 | 1 | Infrastructure & scaffold | ✅ Complete |
@@ -152,28 +22,337 @@ document-extraction/
 | 3 | Invoice & BOE extractors | ✅ Complete |
 | 5 | Validators & confidence scoring (hybrid rules + SLM) | ✅ Complete |
 | 6 | FastAPI routes + Celery workers | ✅ Complete |
-| 7 | Shadow mode & production cutover | ⬜ Next — unscoped |
+| 7 | Production hardening | ✅ Complete |
+| 8 | Frontend | ⬜ Not started |
+| 9 | Cloud deployment | ⬜ Not started |
 
 ---
 
-## Key Learnings & Principles (Phase 6 additions)
+## What Was Built — Phase by Phase
 
-- **A passing test is not evidence — a passing test whose timing, log output, or DB state corroborates the claim is evidence.** This phase produced multiple false "PASSED" results that were actually silent no-ops, swallowed exceptions, or partial executions: a chain test that caught `ConnectionError` and returned normally (silent skip reported as pass), a chain test that "passed" in 6.67s when the real SLM call alone takes 30-90s (validation had silently failed and fallen back to rule-only), and a webhook retry test that called the task function directly instead of through a real worker, making genuine retry behavior structurally untestable while still reporting a pass. **The fix pattern every time was the same: read the actual test code, not the summary of it, and check whether the timing/log output is even physically consistent with the claim before trusting a green checkmark.**
+### Phase 1 — Infrastructure & Scaffold
+- Docker Compose stack with 6 containers: `api`, `worker`, `postgres`, `redis`, `flower`, `vllm`
+- PostgreSQL schema via `database/migrations/001_initial_schema.sql`
+- FastAPI `api/main.py` with `/health` endpoint
 
-- **Two distinct circular-import bugs occurred in `tasks/` in one session, both from the same root mistake: a shared helper (`get_db_url`, then later `update_status_async`) was defined inside a task module instead of a shared `core/` module.** Any time a task module needs to import something from a sibling task module, that's a signal the shared logic is in the wrong place. Fixed permanently by moving both into `core/db.py`. **Rule going forward: shared helpers never live in `tasks/`, full stop — `tasks/` modules may import from `core/`, never from each other** (except where a Celery chain's return-value passing makes that unnecessary).
+### Phase 2 — VLM Integration
+- `models/vlm_client.py` — HTTP client for vLLM OpenAI-compatible endpoint
+- `classifiers/vlm_classifier/__init__.py` — classifies documents as `invoice` or `bill_of_entry`
 
-- **`Celery.autodiscover_tasks()` is fragile for this project's plain-package layout and was abandoned in favor of explicit imports.** `core/celery_app.py` now does `from tasks import extract_task, validate_task, webhook_task` directly rather than relying on autodiscovery, which kept failing with `ModuleNotFoundError: No module named 'tasks'` inside the container despite the same import succeeding standalone outside Docker. Explicit imports are also more robust given this project's recurring history with package/flat-file ambiguity (see Phase 2 and Phase 5 learnings) — there's no discovery mechanism left to get confused by.
+### Phase 3 — Invoice & BOE Extractors
+- `extractors/invoice/` — extracts: `invoice_number`, `invoice_date`, `supplier`, `quantity`, `unit_price`, `po_number`, `cgst`, `sgst`
+- `extractors/bill_of_entry/` — extracts: `boe_number`, `boe_date`, `igst`, `cust_duty`, `sbcess`
 
-- **Inside Docker Compose, service-to-service networking uses the Compose service name, never `localhost`.** `core/db.py`'s fallback `DATABASE_URL` default (and the actual `.env` value) pointed at `localhost:5432`, which inside the `api`/`worker` containers refers to the container itself, not the `postgres` service — producing `OSError: Connect call failed ('127.0.0.1', 5432)`. Fixed by setting `.env`'s `DATABASE_URL` host segment to `postgres` (the Compose service name) and removing the `localhost` fallback entirely in favor of raising a clear error if the env var is missing. **Any new env var added to `.env` that points at another container in this stack must use the service name, never `localhost` — this applies equally to `REDIS_URL` and any future inter-service URL.**
+### Phase 5 — Hybrid Validation
+- Rule-based validators for each field type
+- SLM validator via remote Ollama (Qwen2.5:3b on Lightning AI)
+- Merge layer combining rule + SLM results
+- Confidence scoring and `requires_review` flagging
+- `validators/` directory
 
-- **Real Python objects from extraction/DB round-trips (`datetime.date`, `decimal.Decimal`) are not JSON-serializable by default, and this only surfaces once data flows through a real network call — not in earlier phases' more isolated tests.** Hit twice independently: once in `models/slm_client.py` building the Ollama request payload (`invoice_date` as `datetime.date`), once in `tasks/webhook_task.py` building the outbound webhook payload (a `Decimal` field, likely from a Postgres `NUMERIC` column via asyncpg). Both call sites also used `requests`'/`httpx`'s convenience `json=` parameter, which doesn't accept a custom encoder — fixed by switching to manual `json.dumps(payload, cls=ExtractionJSONEncoder)` passed as `content=`/raw string. **`core/json_utils.py`'s `ExtractionJSONEncoder` is now the single shared encoder for any future manual JSON serialization of extraction data — do not write a second ad-hoc encoder.** Note: `Decimal` is converted to `float` for outbound JSON, which is fine for webhook/SLM payloads but would lose precision if any future code re-parses that JSON and does further financial math on the result — flag that separately if it ever comes up.
+### Phase 6 — FastAPI Routes + Celery Workers
+**Architecture:** `POST /documents` returns 202 immediately, dispatches `chain(extract_task, validate_task)`. On completion, `webhook_task` POSTs result to `callback_url` with exponential backoff retry.
 
-- **A Celery task's retry behavior (`self.retry(...)`) cannot be tested by calling the task function directly in a script.** `self.retry()` only does something meaningful when the task is actually running inside a worker process consuming from a real broker — called directly, it just raises a `Retry` exception once and stops, making it impossible to observe a second attempt. The only way to test retry/backoff behavior for real is to dispatch via `.delay()`/`.apply_async()` against the actual running worker container and observe the real outcome (DB state, real listener hits) — `unittest.mock.patch` in the test process also cannot reach into a separate worker container's process space, so any test needing to control what a task "sees" must do so via real shared state (a real DB row), not in-process mocking.
+**Components built:**
+- `core/celery_app.py` — Celery app with explicit task imports
+- `core/db.py` — shared `get_db_url()` and DB helpers
+- `core/json_utils.py` — `ExtractionJSONEncoder` for `date`/`datetime`/`Decimal`
+- `tasks/extract_task.py` — classify + extract via vLLM
+- `tasks/validate_task.py` — rule + SLM validation
+- `tasks/webhook_task.py` — delivers result to `callback_url`, retries on non-2xx
+- `api/routes/documents.py` — all 4 routes
+- `database/migrations/002_phase6_pipeline.sql` — adds pipeline columns to `documents`
 
-- **A Postgres volume can silently have zero schema applied even after multiple "phases complete" with "all tests passing."** Discovered mid-Phase-6 that `docextract_postgres` had no tables at all — neither `001_initial_schema.sql` nor `002_phase6_pipeline.sql` had ever been run against it, and there was no existing migration-runner convention, just raw `.sql` files sitting in `database/migrations/` with no documented "how do I actually apply these" step. Applied manually via `Get-Content file.sql | docker exec -i docextract_postgres psql -U postgres -d docextract` (note: PowerShell does not support bash's `<` stdin redirection — use `Get-Content | docker exec -i ...` instead). **Open question carried into Phase 7: were Phase 1–5's DB-touching tests ever actually run against a real, populated Postgres, or did they pass against mocks/a different volume?** Worth confirming explicitly rather than assuming.
+**Routes:**
+- `POST /documents` — submit document
+- `GET /documents/review` — review queue
+- `GET /documents/{document_id}` — full detail
+- `GET /documents/{document_id}/status` — status polling
 
-- **A `403` with `content-length: 0` from Lightning AI's public cloudspace edge proxy is consistent with the already-documented `127.0.0.1`-binding failure mode, not necessarily a new Ports-panel/access-control issue.** When the Ollama binding reverts to localhost-only, the edge proxy can reach no real upstream to authorize against and falls back to a bare 403 rather than a more obviously diagnostic timeout or connection error. Check `ss -tlnp | grep 11434` from inside the Studio terminal before investigating the Ports panel UI.
+### Phase 7 — Production Hardening
+- `core/auth.py` — API key auth via `X-API-Key` header
+- `~/on_start.sh` on Lightning AI — auto-installs Ollama and binds to `0.0.0.0:11434` on every session start
+- `docker-compose.yml` — fixed `SLM_ENDPOINT` default to Lightning AI URL
+- `scripts/migrate.ps1` — applies all migrations in order, idempotent
+- `docs/API.md` — full API reference documentation
+- All test scripts updated to include `X-API-Key` header
 
 ---
 
-**Guiding principle for all future phases:** Follow the build plan as the skeleton. Fill gaps with decisions that match the actual deployed environment. Treat a "PASSED" test result as a claim to be corroborated — via timing, log output, or direct DB/state inspection — not as proof on its own, especially for anything crossing a process, container, or network boundary.
+## Current Architecture
+
+```
+POST /documents (FastAPI)
+    → saves file to /uploads
+    → inserts row to documents (status=pending)
+    → dispatches Celery chain
+
+extract_task (Celery worker)
+    → status = extracting
+    → classify via vLLM (Qwen2.5-VL-3B AWQ, ~1-2s)
+    → extract fields via vLLM (~2-3s)
+    → saves extraction to DB
+    → chains to validate_task
+
+validate_task (Celery worker)
+    → status = validating
+    → rule-based validation
+    → SLM validation via remote Ollama on Lightning AI (~30-140s)
+    → merges results, computes confidence, sets requires_review
+    → saves to DB
+    → status = completed
+    → dispatches webhook_task
+
+webhook_task (Celery worker)
+    → POSTs result to callback_url
+    → retries up to 4 times (2s, 4s, 8s, 16s exponential backoff)
+    → on exhaustion: logs and dies quietly
+```
+
+---
+
+## Bugs Fixed & Mistakes Made
+
+### Silent test failures — the most recurring problem
+Multiple tests reported `PASSED` while actually being no-ops or partial executions:
+- A chain test caught `ConnectionError` and returned normally — silent skip reported as pass
+- A chain test "passed" in 6.67s when the real SLM call takes 30-90s — validation had silently failed and fallen back to rule-only
+- A webhook retry test called the task function directly instead of through a real worker — retry behavior was structurally untestable but still reported pass
+
+**Fix pattern:** Always corroborate a green test with timing, log output, or direct DB inspection. A 4s validate_task is always a silent fallback, never a real SLM call.
+
+**Instrumentation added:** `test_celery_chain.py` now logs every status transition with timestamps and computes `extract_task` and `validate_task` durations. A WARNING fires if `validate_task` finishes in under 10s.
+
+---
+
+### Lightning AI Ollama binding reversion
+**Symptom:** Every Lightning AI session restart wiped the filesystem, removing Ollama entirely and requiring manual reinstall + systemd override each session. A `403` from the public cloudspace URL was the observable symptom — looked like an access control issue but was actually the binding reverting to `127.0.0.1`-only.
+
+**Diagnosis:** `ss -tlnp | grep 11434` shows `127.0.0.1:11434` instead of `0.0.0.0:11434`.
+
+**Fix:** `~/on_start.sh` on Lightning AI — runs automatically on session start, installs Ollama, writes the systemd override, restarts the service (restart, not start — critical because the install script starts Ollama immediately at 127.0.0.1 before the override is written), then pulls the model.
+
+**Key detail:** The override must be written and `systemctl restart ollama` called AFTER `ollama install.sh` completes, not before. The install script starts the service immediately — if you only call `enable + start` without `restart`, the override is never picked up.
+
+---
+
+### `SLM_ENDPOINT` being overridden by Windows shell env var
+**Symptom:** Worker container was using `SLM_ENDPOINT=http://localhost` instead of the Lightning AI URL, causing `Connection refused` on every SLM call. SLM silently fell back to rule-only validation. Validate_task completed in ~3s instead of 30-90s.
+
+**Root cause:** `$env:SLM_ENDPOINT="http://localhost"` had been set in the PowerShell session for running tests. Docker Compose picks up shell environment variables and they override `.env` file values. The variable persisted across restarts.
+
+**Fix 1 (immediate):** `Remove-Item Env:SLM_ENDPOINT` in PowerShell, then `docker-compose restart worker`.
+
+**Fix 2 (permanent):** Changed `docker-compose.yml` to use `SLM_ENDPOINT=${SLM_ENDPOINT:-https://11434-...cloudspaces.litng.ai}` with a hardcoded fallback default so the container always gets the right URL even if the shell var is unset.
+
+**Rule going forward:** Any env var in `docker-compose.yml` that points at an external service should have a hardcoded fallback default, not a bare `${VAR}` substitution with no default.
+
+---
+
+### Two circular import bugs in `tasks/`
+**Symptom:** `ImportError` on worker startup.
+
+**Root cause (both times):** A shared helper (`get_db_url`, then `update_status_async`) was defined inside a task module. When another task module tried to import it, circular imports occurred.
+
+**Fix:** Moved all shared helpers to `core/db.py`. Rule established: `tasks/` modules may import from `core/`, never from each other.
+
+---
+
+### `Celery.autodiscover_tasks()` failing inside Docker
+**Symptom:** `ModuleNotFoundError: No module named 'tasks'` inside the container despite the import working outside Docker.
+
+**Fix:** Abandoned autodiscovery in favor of explicit imports in `core/celery_app.py`:
+```python
+from tasks import extract_task, validate_task, webhook_task
+```
+
+---
+
+### Docker Compose inter-service networking
+**Symptom:** `OSError: Connect call failed ('127.0.0.1', 5432)` — worker couldn't reach Postgres.
+
+**Root cause:** `DATABASE_URL` was using `localhost:5432` as the host. Inside a container, `localhost` refers to the container itself, not the `postgres` service.
+
+**Fix:** Use the Compose service name (`postgres`) as the host in `DATABASE_URL`. Rule: any URL in `.env` pointing at another container must use the service name, never `localhost`.
+
+---
+
+### `datetime.date` and `Decimal` not JSON-serializable
+**Symptom:** `TypeError` when building Ollama request payload and webhook payload — `invoice_date` was a `datetime.date`, numeric fields from Postgres were `Decimal`.
+
+**Root cause:** `requests`/`httpx` `json=` parameter doesn't accept a custom encoder.
+
+**Fix:** `core/json_utils.py` — `ExtractionJSONEncoder` handles `date`/`datetime`/`Decimal`. All manual `json.dumps()` calls use `cls=ExtractionJSONEncoder` and pass result as `content=` rather than `json=`.
+
+---
+
+### Postgres volume had zero tables
+**Symptom (discovered mid-Phase 6):** `docextract_postgres` container had no tables at all — neither migration had ever been applied.
+
+**Root cause:** No migration runner existed. The `.sql` files sat in `database/migrations/` with no documented apply step.
+
+**Fix (immediate):** Applied manually via:
+```powershell
+Get-Content file.sql | docker exec -i docextract_postgres psql -U postgres -d docextract
+```
+Note: PowerShell does not support bash's `<` stdin redirection — use `Get-Content | docker exec -i`.
+
+**Fix (permanent):** `scripts/migrate.ps1` — applies all migrations in order, idempotent (safe to run on an already-migrated DB).
+
+---
+
+### Route ordering bug
+**Symptom:** `GET /documents/review` was being matched by the `GET /documents/{document_id}` parameterized route, treating `"review"` as a document ID.
+
+**Fix:** Registered specific routes before parameterized routes in `api/routes/documents.py`:
+```python
+# Correct order:
+GET /documents/review      # specific — registered first
+GET /documents/{id}        # parameterized — registered after
+GET /documents/{id}/status
+```
+
+---
+
+### `.env` committed to GitHub
+**Discovered:** `.env` containing `API_KEY` and `SLM_ENDPOINT` was publicly visible in the repo.
+
+**Fix:** Added `.env` and `uploads/` to `.gitignore`. `.env.example` already existed as the correct pattern.
+
+---
+
+### PowerShell `curl` is not real curl
+**Symptom:** `curl -X`, `-H`, `-F` flags failing — PowerShell's `curl` is an alias for `Invoke-WebRequest` which uses completely different syntax.
+
+**Fix:** Use `Invoke-RestMethod` with `-Method`, `-Headers @{}`, and manual multipart body construction. For file uploads specifically, `-Form` requires PowerShell 7+ — on older versions, build the multipart body manually.
+
+---
+
+## Test Suite — Current State
+
+All tests pass against the live Docker stack. Run with:
+
+```powershell
+$env:PYTHONPATH="."
+$env:SLM_ENDPOINT="http://localhost"   # dummy value — Settings() validates on import but worker uses .env
+$env:API_KEY="9f86d081884c7d659a2feaa0c55ad015"
+pytest scripts/test_document_detail_and_status.py scripts/test_review_queue.py scripts/test_route_ordering.py scripts/test_celery_chain.py scripts/test_failure_paths.py scripts/test_webhook_delivery.py -v -s
+```
+
+| Test | What it proves |
+|---|---|
+| `test_document_detail_and_status` | `GET /documents/{id}` and `GET /documents/{id}/status` return correct shapes |
+| `test_review_queue` | `GET /documents/review` surfaces flagged documents from real DB |
+| `test_route_ordering` | `/review` resolves to review handler, not `/{id}` |
+| `test_celery_chain` | Full pipeline end-to-end with real vLLM + real Ollama. Validates timing — expect ~5s extract, 30-140s validate |
+| `test_celery_chain_known_bad` | XFAIL — `boe.png` extracts at 1.0 confidence, no low-confidence fixture exists for real VLM |
+| `test_failure_paths` | Extraction failure path and webhook exhaustion (dead-letter) path |
+| `test_webhook_delivery` | Real retry/backoff — 3 POSTs (500, 500, 200), gaps 2s and 4s, DB confirms `webhook_attempts=3` |
+
+**Critical check for `test_celery_chain`:** If `validate_task duration` is under 10s, the SLM fell back to rule-only. Check worker logs for `403 Forbidden` or `Connection refused` on the Lightning AI URL.
+
+---
+
+## Latency Profile (confirmed empirically)
+
+| Stage | Duration |
+|---|---|
+| Classification (vLLM) | ~1-2s |
+| Extraction (vLLM) | ~2-3s |
+| Validation (SLM, invoice) | 30-140s depending on Lightning AI load |
+| Validation (SLM, BOE) | 25-50s |
+| Total pipeline | ~35-145s |
+
+This is why async design is mandatory — synchronous would mean the client waits 2+ minutes per document.
+
+---
+
+## Smoke Test Results (June 22, 2026)
+
+| Fixture | Result | Notes |
+|---|---|---|
+| `sample_invoice.png` | ✅ completed, confidence=0.9625 | `po_number` correctly flagged null at 0.7 |
+| `boe.png` | ✅ completed, confidence=1.0 | All 5 fields clean |
+| `boe_corrupted_sbcess.png` | ✅ completed, confidence=0.88, requires_review=True | `sbcess` flagged at 0.4 — rule caught bad data |
+| `garbage.png` | ✅ failed | Correctly rejected as unknown document type |
+
+---
+
+## Operational Notes
+
+### Every session checklist (Lightning AI)
+The `~/on_start.sh` script handles this automatically on session start. If for any reason Ollama is not working, verify:
+
+```bash
+ss -tlnp | grep 11434   # must show 0.0.0.0:11434, not 127.0.0.1
+curl http://localhost:11434/api/tags
+```
+
+If bound to `127.0.0.1`:
+```bash
+bash ~/on_start.sh
+```
+
+From Windows, verify public tunnel:
+```powershell
+Invoke-RestMethod -Uri "https://11434-01kvfdrbbe002xwhcqng7rhh8e.cloudspaces.litng.ai/api/tags"
+```
+
+A `403` from the public URL = binding is `127.0.0.1`. Do not chase the Ports panel UI — fix the binding first.
+
+### Applying migrations to a fresh Postgres volume
+```powershell
+.\scripts\migrate.ps1
+```
+
+Safe to run on an already-migrated DB — idempotent.
+
+### Starting the stack
+```powershell
+docker-compose up -d
+docker-compose ps   # confirm all 6 services running
+```
+
+---
+
+## What's Next
+
+### Phase 8 — Frontend
+Build a UI that talks to the API. Contract is in `docs/API.md`.
+
+**Key flows the frontend needs to handle:**
+- File upload (`POST /documents`) with API key header
+- Status polling (`GET /documents/{id}/status`) — pipeline takes 35-145s, frontend must poll or use webhook
+- Document detail view (`GET /documents/{id}`) — show extracted fields, confidence scores, flags
+- Review queue (`GET /documents/review`) — list flagged documents for human review, support filters by doc_type and date range
+- Error states — `status: failed` with `failure_reason`
+
+**Auth:** Include `X-API-Key: <key>` header on all `/documents` requests. `/health` does not require auth.
+
+**Suggested tech:** Any — React, Vue, plain HTML. The API is REST+JSON, no special requirements.
+
+### Phase 9 — Cloud Deployment
+Move the Docker Compose stack from localhost to a real server.
+
+**What needs to change:**
+- Choose a cloud provider (AWS, GCP, DigitalOcean, etc.)
+- Set up a VM with Docker and Docker Compose
+- Copy the stack and `.env` to the server
+- Update `docs/API.md` base URL to the real public URL
+- Add API key auth to any public-facing reverse proxy (nginx)
+- Decide on document storage — currently files are written to local `/uploads`, needs a persistent volume or object storage (S3/GCS) for production
+- Migrate Lightning AI Ollama to a persistent VM — the current Lightning AI setup is fine for development but has no uptime guarantee
+
+**Open question:** Keep self-hosting Ollama on a GPU VM, or switch to a hosted model API for SLM validation? Hosted API (e.g. Together AI, Groq) eliminates the Lightning AI dependency entirely and gives predictable latency — worth evaluating before committing to a GPU VM.
+
+---
+
+## Guiding Principles (established across all phases)
+
+- **A PASSED test is not evidence — timing, logs, and DB state are evidence.** A validate_task finishing in 3s when the real SLM takes 30-90s is a failed test that reported green.
+- **Shared helpers never live in `tasks/`** — they go in `core/`. Tasks may import from `core/`, never from each other.
+- **Explicit imports over autodiscovery** — `core/celery_app.py` imports tasks explicitly. Autodiscovery failed inside Docker and was abandoned.
+- **Inter-container URLs use the Compose service name, never `localhost`** — applies to DATABASE_URL, REDIS_URL, and any future service URL.
+- **Docker Compose shell env vars override `.env` file values** — always check `docker-compose exec <service> env` when a container is using unexpected values.
+- **PowerShell `curl` is `Invoke-WebRequest`, not real curl** — use `Invoke-RestMethod` with PowerShell-native syntax.
+- **A 403 from Lightning AI's public URL = binding reversion, not an access control issue** — check `ss -tlnp | grep 11434` before investigating anything else.

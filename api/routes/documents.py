@@ -64,6 +64,68 @@ async def upload_document(
     
     return {"document_id": doc_id, "status": "pending"}
 
+@router.get("")
+async def list_documents(
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    status: Optional[str] = Query(None, description="Status filter"),
+    document_type: Optional[str] = Query(None, description="Filter by document_type (invoice or bill_of_entry)")
+):
+    db_url = get_db_url()
+    conn = await asyncpg.connect(db_url)
+    
+    try:
+        query = """
+            SELECT d.id as document_id, d.file_name, d.document_type, d.status, d.created_at,
+                   e.overall_confidence, e.requires_review
+            FROM documents d
+            LEFT JOIN extractions e ON d.id = e.document_id
+            WHERE 1=1
+        """
+        params = []
+        param_idx = 1
+        
+        if status:
+            query += f" AND d.status = ${param_idx}"
+            params.append(status)
+            param_idx += 1
+            
+        if document_type:
+            query += f" AND d.document_type = ${param_idx}"
+            params.append(document_type)
+            param_idx += 1
+            
+        # Count total
+        count_query = f"SELECT COUNT(*) FROM ({query}) AS sub"
+        total_count = await conn.fetchval(count_query, *params)
+        
+        # Paginate
+        query += f" ORDER BY d.created_at DESC LIMIT ${param_idx} OFFSET ${param_idx + 1}"
+        params.extend([limit, offset])
+        
+        rows = await conn.fetch(query, *params)
+        
+        results = []
+        for row in rows:
+            results.append({
+                "document_id": str(row["document_id"]),
+                "file_name": row["file_name"],
+                "document_type": row["document_type"],
+                "status": row["status"],
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "overall_confidence": float(row["overall_confidence"]) if row["overall_confidence"] is not None else None,
+                "requires_review": row["requires_review"]
+            })
+            
+        return {
+            "items": results,
+            "total": total_count,
+            "limit": limit,
+            "offset": offset
+        }
+    finally:
+        await conn.close()
+
 @router.get("/review")
 async def get_review_queue(
     doc_type: Optional[str] = Query(None, description="Filter by document_type"),

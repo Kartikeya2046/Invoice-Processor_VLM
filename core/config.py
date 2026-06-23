@@ -14,4 +14,10 @@ class Settings(BaseSettings):
     WEBHOOK_RETRY_BACKOFF_BASE: float = 2.0
     WEBHOOK_TIMEOUT: float = 10.0
 
+    ALLOWED_ORIGINS: str = "http://localhost:5173"
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.ALLOWED_ORIGINS.split(",") if origin.strip()]
+
 settings = Settings()
