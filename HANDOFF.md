@@ -1,358 +1,193 @@
 # Agent Handoff — AI Document Extraction System
-**Date:** June 22, 2026
+
+**Date:** June 23, 2026
 **Repo:** https://github.com/Kartikeya2046/Invoice-Processor_VLM
-**Branch:** `main`
+**Branch:** main
+**Builds on:** Handoff dated June 22, 2026 (Phases 1–7 complete at that point)
 
 ---
 
-## Project Overview
+## Summary of today's session
 
-Enterprise pipeline that replaces an old OCR + Mistral approach with a VLM-based document extraction system. The system classifies, extracts, and validates fields from **Invoices** and **Bills of Entry (BOE)** using **Qwen2.5-VL-3B-Instruct (AWQ INT4)** served via vLLM, plus a hybrid rule-based + SLM validation layer, wired into an async Celery pipeline with webhook delivery.
+Today's session covered two tracks:
 
-**Stack:** FastAPI · PostgreSQL · Redis · Celery · vLLM (Qwen2.5-VL-3B AWQ INT4) · Docker Compose · Ollama (remote, Lightning AI)
+1. **Phase 8 (Frontend)** — built and shipped. React dashboard with upload, document list, and detail view, talking to the existing backend.
+2. **PDF support** — discovered mid-session that PDFs were never actually supported end-to-end despite being accepted at the API layer. This opened into a real sub-phase of work (multi-page extraction + merge), tracked here as **Phase 8.5**, currently **in progress, Step D not yet verified**.
+
+Cloud deployment (Phase 9 / Oracle VM) was scoped and researched today but **not started** — deliberately deferred until Phase 8.5 is complete, since deploying an unfinished merge engine would just move today's bugs onto a less convenient machine.
 
 ---
 
-## Build Plan — Final Status
+## Build Plan — Status as of today
 
 | Phase | Title | Status |
 |---|---|---|
-| 1 | Infrastructure & scaffold | ✅ Complete |
-| 2 | VLM integration (Qwen2.5-VL) | ✅ Complete |
-| 3 | Invoice & BOE extractors | ✅ Complete |
-| 5 | Validators & confidence scoring (hybrid rules + SLM) | ✅ Complete |
-| 6 | FastAPI routes + Celery workers | ✅ Complete |
-| 7 | Production hardening | ✅ Complete |
-| 8 | Frontend | ⬜ Not started |
-| 9 | Cloud deployment | ⬜ Not started |
+| 1 | Infrastructure & scaffold | ✅ Complete (prior session) |
+| 2 | VLM integration (Qwen2.5-VL) | ✅ Complete (prior session) |
+| 3 | Invoice & BOE extractors | ✅ Complete (prior session) |
+| 5 | Validators & confidence scoring | ✅ Complete (prior session) |
+| 6 | FastAPI routes + Celery workers | ✅ Complete (prior session) |
+| 7 | Production hardening | ✅ Complete (prior session) |
+| **8** | **Frontend** | ✅ **Complete (today)** |
+| **8.5** | **Multi-page PDF support (new, added today)** | 🔶 **In progress — Steps A–C done, Step D built but not yet verified** |
+| 9 | Cloud deployment | ⬜ Not started — scoped today, execution deferred until 8.5 is verified |
 
 ---
 
-## What Was Built — Phase by Phase
+## Phase 8 — Frontend (completed today)
 
-### Phase 1 — Infrastructure & Scaffold
-- Docker Compose stack with 6 containers: `api`, `worker`, `postgres`, `redis`, `flower`, `vllm`
-- PostgreSQL schema via `database/migrations/001_initial_schema.sql`
-- FastAPI `api/main.py` with `/health` endpoint
+### What was built
 
-### Phase 2 — VLM Integration
-- `models/vlm_client.py` — HTTP client for vLLM OpenAI-compatible endpoint
-- `classifiers/vlm_classifier/__init__.py` — classifies documents as `invoice` or `bill_of_entry`
-
-### Phase 3 — Invoice & BOE Extractors
-- `extractors/invoice/` — extracts: `invoice_number`, `invoice_date`, `supplier`, `quantity`, `unit_price`, `po_number`, `cgst`, `sgst`
-- `extractors/bill_of_entry/` — extracts: `boe_number`, `boe_date`, `igst`, `cust_duty`, `sbcess`
-
-### Phase 5 — Hybrid Validation
-- Rule-based validators for each field type
-- SLM validator via remote Ollama (Qwen2.5:3b on Lightning AI)
-- Merge layer combining rule + SLM results
-- Confidence scoring and `requires_review` flagging
-- `validators/` directory
-
-### Phase 6 — FastAPI Routes + Celery Workers
-**Architecture:** `POST /documents` returns 202 immediately, dispatches `chain(extract_task, validate_task)`. On completion, `webhook_task` POSTs result to `callback_url` with exponential backoff retry.
-
-**Components built:**
-- `core/celery_app.py` — Celery app with explicit task imports
-- `core/db.py` — shared `get_db_url()` and DB helpers
-- `core/json_utils.py` — `ExtractionJSONEncoder` for `date`/`datetime`/`Decimal`
-- `tasks/extract_task.py` — classify + extract via vLLM
-- `tasks/validate_task.py` — rule + SLM validation
-- `tasks/webhook_task.py` — delivers result to `callback_url`, retries on non-2xx
-- `api/routes/documents.py` — all 4 routes
-- `database/migrations/002_phase6_pipeline.sql` — adds pipeline columns to `documents`
-
-**Routes:**
-- `POST /documents` — submit document
-- `GET /documents/review` — review queue
-- `GET /documents/{document_id}` — full detail
-- `GET /documents/{document_id}/status` — status polling
-
-### Phase 7 — Production Hardening
-- `core/auth.py` — API key auth via `X-API-Key` header
-- `~/on_start.sh` on Lightning AI — auto-installs Ollama and binds to `0.0.0.0:11434` on every session start
-- `docker-compose.yml` — fixed `SLM_ENDPOINT` default to Lightning AI URL
-- `scripts/migrate.ps1` — applies all migrations in order, idempotent
-- `docs/API.md` — full API reference documentation
-- All test scripts updated to include `X-API-Key` header
-
----
-
-## Current Architecture
+New `frontend/` directory at repo root. Vite + React (JavaScript), plain CSS, no UI library.
 
 ```
-POST /documents (FastAPI)
-    → saves file to /uploads
-    → inserts row to documents (status=pending)
-    → dispatches Celery chain
-
-extract_task (Celery worker)
-    → status = extracting
-    → classify via vLLM (Qwen2.5-VL-3B AWQ, ~1-2s)
-    → extract fields via vLLM (~2-3s)
-    → saves extraction to DB
-    → chains to validate_task
-
-validate_task (Celery worker)
-    → status = validating
-    → rule-based validation
-    → SLM validation via remote Ollama on Lightning AI (~30-140s)
-    → merges results, computes confidence, sets requires_review
-    → saves to DB
-    → status = completed
-    → dispatches webhook_task
-
-webhook_task (Celery worker)
-    → POSTs result to callback_url
-    → retries up to 4 times (2s, 4s, 8s, 16s exponential backoff)
-    → on exhaustion: logs and dies quietly
+frontend/
+  src/
+    api/client.js          — centralized fetch wrapper, injects X-API-Key from env on every call
+    components/
+      UploadZone.jsx        — drag-drop + "Upload Files" + "Upload Folder" (webkitdirectory)
+      DocumentList.jsx      — lists all documents, polls in-progress ones every 5s
+      DocumentDetail.jsx    — renders extracted fields, confidence, flags for selected doc
+      StatusBadge.jsx       — pending/extracting/validating/completed/failed pill
+    pages/Dashboard.jsx     — composes the above
+  .env / .env.example       — VITE_API_BASE_URL, VITE_API_KEY
 ```
 
----
+### Required backend addition
 
-## Bugs Fixed & Mistakes Made
+`GET /documents` did not exist before today — only `/documents/review` (flagged-only) and `/documents/{id}` (single doc). Added to `api/routes/documents.py`:
+- Paginated list of ALL documents regardless of `requires_review`, ordered by `created_at DESC`.
+- Registered before the parameterized `/documents/{id}` route, following the existing route-ordering convention (this codebase already hit a route-ordering bug once before, with `/review` being swallowed by `/{id}`).
 
-### Silent test failures — the most recurring problem
-Multiple tests reported `PASSED` while actually being no-ops or partial executions:
-- A chain test caught `ConnectionError` and returned normally — silent skip reported as pass
-- A chain test "passed" in 6.67s when the real SLM call takes 30-90s — validation had silently failed and fallen back to rule-only
-- A webhook retry test called the task function directly instead of through a real worker — retry behavior was structurally untestable but still reported pass
+### Bugs hit and fixed during Phase 8
 
-**Fix pattern:** Always corroborate a green test with timing, log output, or direct DB inspection. A 4s validate_task is always a silent fallback, never a real SLM call.
+**CORS blocking all browser → API calls.**
+- Symptom: `GET /health` worked fine when hit directly in the browser, but every `/documents/*` call failed in the console with `No 'Access-Control-Allow-Origin' header is present`.
+- Root cause: `/health` is a plain request with no custom headers, so the browser never sends a CORS preflight for it. Every `/documents/*` call sends `X-API-Key`, a non-standard header, which forces an `OPTIONS` preflight — and FastAPI had zero CORS middleware configured, so it never answered the preflight correctly.
+- Fix: added `CORSMiddleware` in `api/main.py`, with `allow_origins` sourced from a new `ALLOWED_ORIGINS` setting in `core/config.py` (comma-separated string parsed to a list, defaulting to `http://localhost:5173`) rather than hardcoded — so adding the production frontend's URL later is a config change, not a code change.
+- Verified: real browser upload + list load confirmed working post-fix, not just a simulated curl preflight check.
 
-**Instrumentation added:** `test_celery_chain.py` now logs every status transition with timestamps and computes `extract_task` and `validate_task` durations. A WARNING fires if `validate_task` finishes in under 10s.
-
----
-
-### Lightning AI Ollama binding reversion
-**Symptom:** Every Lightning AI session restart wiped the filesystem, removing Ollama entirely and requiring manual reinstall + systemd override each session. A `403` from the public cloudspace URL was the observable symptom — looked like an access control issue but was actually the binding reverting to `127.0.0.1`-only.
-
-**Diagnosis:** `ss -tlnp | grep 11434` shows `127.0.0.1:11434` instead of `0.0.0.0:11434`.
-
-**Fix:** `~/on_start.sh` on Lightning AI — runs automatically on session start, installs Ollama, writes the systemd override, restarts the service (restart, not start — critical because the install script starts Ollama immediately at 127.0.0.1 before the override is written), then pulls the model.
-
-**Key detail:** The override must be written and `systemctl restart ollama` called AFTER `ollama install.sh` completes, not before. The install script starts the service immediately — if you only call `enable + start` without `restart`, the override is never picked up.
+### Verified working (real evidence, not self-report)
+- Upload via drag-drop, "Upload Files," and "Upload Folder" — folder upload correctly filters unsupported extensions and reports a skip count.
+- Document list polls in-progress documents every 5s, stops polling on `completed`/`failed`.
+- Document detail renders extracted fields, humanized field names, confidence percentages, amber-highlighted flags.
+- `GET /documents` confirmed against the live DB returning real paginated data (47 documents).
 
 ---
 
-### `SLM_ENDPOINT` being overridden by Windows shell env var
-**Symptom:** Worker container was using `SLM_ENDPOINT=http://localhost` instead of the Lightning AI URL, causing `Connection refused` on every SLM call. SLM silently fell back to rule-only validation. Validate_task completed in ~3s instead of 30-90s.
+## Phase 8.5 — Multi-page PDF support (in progress)
 
-**Root cause:** `$env:SLM_ENDPOINT="http://localhost"` had been set in the PowerShell session for running tests. Docker Compose picks up shell environment variables and they override `.env` file values. The variable persisted across restarts.
+### Why this became a separate phase
 
-**Fix 1 (immediate):** `Remove-Item Env:SLM_ENDPOINT` in PowerShell, then `docker-compose restart worker`.
-
-**Fix 2 (permanent):** Changed `docker-compose.yml` to use `SLM_ENDPOINT=${SLM_ENDPOINT:-https://11434-...cloudspaces.litng.ai}` with a hardcoded fallback default so the container always gets the right URL even if the shell var is unset.
-
-**Rule going forward:** Any env var in `docker-compose.yml` that points at an external service should have a hardcoded fallback default, not a bare `${VAR}` substitution with no default.
-
----
-
-### Two circular import bugs in `tasks/`
-**Symptom:** `ImportError` on worker startup.
-
-**Root cause (both times):** A shared helper (`get_db_url`, then `update_status_async`) was defined inside a task module. When another task module tried to import it, circular imports occurred.
-
-**Fix:** Moved all shared helpers to `core/db.py`. Rule established: `tasks/` modules may import from `core/`, never from each other.
-
----
-
-### `Celery.autodiscover_tasks()` failing inside Docker
-**Symptom:** `ModuleNotFoundError: No module named 'tasks'` inside the container despite the import working outside Docker.
-
-**Fix:** Abandoned autodiscovery in favor of explicit imports in `core/celery_app.py`:
-```python
-from tasks import extract_task, validate_task, webhook_task
+Mid-session, attempting to upload a real PDF produced:
+```
+Failed Stage: extraction
+Reason: Client error during classify: Client error '400 Bad Request' for url 'http://vllm:8001/v1/chat/completions'
 ```
 
----
+Root cause: Qwen2.5-VL-3B over vLLM's `/v1/chat/completions` expects an image (base64 PNG/JPEG), not raw PDF bytes. The API layer's documented PDF support (per `docs/API.md`) was never backed by actual pipeline support — PDF had never been tested end-to-end before today.
 
-### Docker Compose inter-service networking
-**Symptom:** `OSError: Connect call failed ('127.0.0.1', 5432)` — worker couldn't reach Postgres.
+Further discussion established that the user's real-world PDFs are multi-page, with fields split across pages in a non-trivial way:
+- Identity fields (`invoice_number`, `invoice_date`, `supplier`, company name) — page 1
+- Tax/duty fields (`cgst`, `sgst`, `igst`, `cust_duty`, `sbcess`) — last page
+- `quantity` / `unit_price` — can legitimately span **multiple pages as distinct line items**, not one value per document
 
-**Root cause:** `DATABASE_URL` was using `localhost:5432` as the host. Inside a container, `localhost` refers to the container itself, not the `postgres` service.
+This ruled out a simple "extract page 1 only" shortcut and required a real per-page extraction + merge design, split into verifiable steps given this project's documented history of silent test failures.
 
-**Fix:** Use the Compose service name (`postgres`) as the host in `DATABASE_URL`. Rule: any URL in `.env` pointing at another container must use the service name, never `localhost`.
+### Design decisions locked in this session
 
----
+- **Field split:** scalar fields (one true value per document) vs. list fields (`quantity`, `unit_price` — legitimately multiple values, collected not merged).
+- **Scalar merge rule:** field present on 1 page = full confidence. Pages agree (after normalization) = full confidence. Pages disagree = `requires_review`, both/all conflicting values surfaced with page attribution — never silently average or pick a winner without flagging it.
+- **Disagreement detection is normalized, not exact-string:** dates parsed to date objects, numbers parsed to `Decimal`, strings trimmed/case-folded — before comparing. Chosen deliberately over exact-match after discussion, since VLM output formatting (date format, trailing `.00`) varies across pages even when the underlying value is identical; exact-match would flood the review queue with false conflicts.
+- **`requires_review` ownership (Option 2, chosen by user after tradeoff discussion):** the merge layer sets `requires_review = True` immediately upon detecting a real conflict, before `validate_task` runs. `validate_task` must OR its own computed value with the existing one — **hard requirement: `requires_review` may only go False→True, never True→False.** This guards against a merge-detected conflict being silently erased by a more lenient downstream conclusion.
+- **Confidence does not exist at the extraction stage, for any document** (confirmed via diagnostic, see Step C below) — it has always been produced exclusively by `validate_task`, for single-page documents too. This was initially mistaken for a Step C bug; diagnosis proved it's pipeline-original behavior, not a regression.
 
-### `datetime.date` and `Decimal` not JSON-serializable
-**Symptom:** `TypeError` when building Ollama request payload and webhook payload — `invoice_date` was a `datetime.date`, numeric fields from Postgres were `Decimal`.
+### Steps completed and verified
 
-**Root cause:** `requests`/`httpx` `json=` parameter doesn't accept a custom encoder.
+**Step A — Schema migration (`database/migrations/003_page_support.sql`)**
+- Added nullable `page_number INTEGER` to both `extractions` and `field_confidences`. `NULL` = final merged result; non-null = raw per-page snapshot (kept for audit, per project principle of preferring evidence on disk over trusting logs).
+- Added matching indexes on `(document_id, page_number)` and `(extraction_id, page_number)`.
+- **Important standing gotcha discovered:** `scripts/migrate.ps1` uses a **hardcoded `$migrations` array**, not directory auto-discovery. Every new migration file must be manually added to this array or it silently never runs. Antigravity correctly added `003_page_support.sql` to the array — without this edit, the migration file would have sat in the folder doing nothing despite looking like part of the codebase. **Action item for Phase 9:** the Oracle VM's fresh Postgres volume needs this script run with the full, current array, in order.
+- Idempotency required a fix: original migration used plain `ADD COLUMN`/`CREATE INDEX`, which would error on re-run. Fixed to `ADD COLUMN IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`.
+- Verified via real `\d extractions` / `\d field_confidences` output (columns present) and `pytest` (`test_document_detail_and_status.py`, `test_review_queue.py` both passed, 92.93s — timing itself is evidence of a real SLM call, not a silent fallback).
 
-**Fix:** `core/json_utils.py` — `ExtractionJSONEncoder` handles `date`/`datetime`/`Decimal`. All manual `json.dumps()` calls use `cls=ExtractionJSONEncoder` and pass result as `content=` rather than `json=`.
+**Step B — PDF → per-page image rendering**
+- New `core/pdf_utils.py` using `pymupdf` (`fitz`) — pure-Python, no system poppler/ghostscript dependency, renders at 150 DPI.
+- `POST /documents` detects PDF by MIME/extension, renders synchronously at upload time (before the Celery chain is dispatched), stores page count in the existing `processing_metadata.page_count` column.
+- Corrupt/invalid PDFs return 400 before ever reaching Celery — not a silent pass-through.
+- **Verified with real evidence after one round of pushback:** initial report gave only the upload response (`status: pending`) as "proof" of rendering, which is not sufficient evidence per this project's standards. Re-requested and received: real `SELECT page_count FROM processing_metadata` query showing `1` and `3` for the two test PDFs, and real `find /app/uploads` output showing the actual rendered `_page_1.png` / `_page_2.png` / `_page_3.png` files on disk.
+- Regression-checked: corrupt PDF → real 400 with clear error message; normal PNG path unaffected.
 
----
+**Step C — Per-page classification + extraction loop (no merging yet)**
+- `tasks/extract_task.py` modified: `page_count == 1` path entirely unchanged; `page_count > 1` loops the existing classify/extract logic once per rendered page image, storing each page's result as its own `extractions` row (`page_number` = 1..N) and `field_confidences` rows.
+- Placeholder added (intentionally, to keep this step's scope tight): `validate_task` temporarily pointed at page 1's extraction only, with a `# TODO Step D: replace with merged result` comment.
+- **First verification round caught a real-looking but ultimately false alarm**, worth recording as a lesson: a 3-page synthetic test PDF produced 24 `field_confidences` rows with `extracted_value` and `confidence` both completely blank. Root-caused (with worker log evidence, not assumption) to a **test data defect, not a code defect** — the synthetic PDF used for testing contained only literal text like "INVOICE 1" with no actual invoice fields, so the VLM correctly returned an empty extraction. Re-tested with a corrected fixture (`test_multi_real_data.pdf`, containing real differing values: INV-1001/1002/1003, different suppliers/quantities/prices per page) and confirmed all 24 rows populated with correct, page-distinct real values — strong evidence (three genuinely different values per field, not a repeated/cached result) that the per-page loop does real independent work.
+- **Second diagnostic, also real and not a false alarm but worth recording:** confirmed that `confidence` has *never* existed at the extraction stage for *any* document, single-page included — it's exclusively written by `validate_task` via `INSERT`, never `UPDATE`, into `field_confidences`. Verified by checking a real completed single-page document's full row history and reading the actual `extract_task.py` / `validate_task.py` code paths directly (pasted, not paraphrased). This was not a Step C regression; it simplified the Step D design, since "per-page confidence" was never an input the merge engine needed to reason about.
 
-### Postgres volume had zero tables
-**Symptom (discovered mid-Phase 6):** `docextract_postgres` container had no tables at all — neither migration had ever been applied.
+**Step D — Merge engine (built today, prompt issued, results not yet returned/verified)**
+- `core/merge_utils.py`: `merge_page_extractions(page_results, document_type)` — scalar fields merged per the agreement/disagreement/normalization rules above; list fields (`quantity`, `unit_price`) collected into page-attributed arrays, never merged into one value.
+- `extract_task.py`: for `page_count > 1`, inserts a new `extractions` row with `page_number = NULL` (the Step A convention for "final merged result"), sets `requires_review = True` immediately if conflicts exist, points `validate_task` at this new row (replacing the Step C placeholder).
+- `validate_task.py`: required to OR its own `requires_review` computation with the existing value rather than overwriting it — hard requirement, with an explanatory code comment mandated in the prompt.
+- **Verification requested but not yet received:** 7 checks specified (merged array fields correct, real conflicts correctly flagged, genuine agreement correctly NOT flagged, normalized-equal values correctly NOT flagged as conflicts, the never-downgrade guarantee proven with a real before/after query, single-page regression check, full `test_celery_chain.py` rerun). **This is the next action when work resumes.**
 
-**Root cause:** No migration runner existed. The `.sql` files sat in `database/migrations/` with no documented apply step.
-
-**Fix (immediate):** Applied manually via:
-```powershell
-Get-Content file.sql | docker exec -i docextract_postgres psql -U postgres -d docextract
-```
-Note: PowerShell does not support bash's `<` stdin redirection — use `Get-Content | docker exec -i`.
-
-**Fix (permanent):** `scripts/migrate.ps1` — applies all migrations in order, idempotent (safe to run on an already-migrated DB).
-
----
-
-### Route ordering bug
-**Symptom:** `GET /documents/review` was being matched by the `GET /documents/{document_id}` parameterized route, treating `"review"` as a document ID.
-
-**Fix:** Registered specific routes before parameterized routes in `api/routes/documents.py`:
-```python
-# Correct order:
-GET /documents/review      # specific — registered first
-GET /documents/{id}        # parameterized — registered after
-GET /documents/{id}/status
-```
-
----
-
-### `.env` committed to GitHub
-**Discovered:** `.env` containing `API_KEY` and `SLM_ENDPOINT` was publicly visible in the repo.
-
-**Fix:** Added `.env` and `uploads/` to `.gitignore`. `.env.example` already existed as the correct pattern.
+### Explicitly not done yet (do not assume otherwise)
+- Step D's verification output has not been reviewed. Do not treat the merge engine as working until that evidence is in and checked — this project has a documented history of plausible-sounding "done" reports that turned out to be incomplete or wrong (see Step C's false alarm above, and the CORS fix which initially was only self-tested via simulated preflight before real browser verification was requested).
+- Frontend (`DocumentDetail.jsx`) has NOT been updated to render list-valued fields or conflict data. It will currently render these incorrectly (likely `[object Object]` or similar) once real multi-page documents start producing merged results. This is the deliberate next step after Step D is verified — explicitly deferred, not forgotten.
+- No multi-page BOE testing has been done — all Step C/D testing used invoice fixtures. BOE's field-to-page mapping was confirmed to differ from invoice's (per user, "slightly different per document type") but the specifics were never pinned down, since the invoice case was used to build and verify the general-purpose merge engine first. **Open question for next session: confirm BOE's actual page layout before assuming the same merge engine handles it correctly out of the box** — the merge logic itself is document-type-agnostic (driven by the field lists per `document_type`), so it should work, but this has not been tested with a real or synthetic multi-page BOE fixture.
 
 ---
 
-### PowerShell `curl` is not real curl
-**Symptom:** `curl -X`, `-H`, `-F` flags failing — PowerShell's `curl` is an alias for `Invoke-WebRequest` which uses completely different syntax.
+## Phase 9 — Cloud Deployment (scoped today, not started)
 
-**Fix:** Use `Invoke-RestMethod` with `-Method`, `-Headers @{}`, and manual multipart body construction. For file uploads specifically, `-Form` requires PowerShell 7+ — on older versions, build the multipart body manually.
+### Decisions made
+- **Backend hosting:** Oracle Cloud Free Tier, `VM.Standard.A1.Flex` (ARM, Ampere A1), 4 OCPU / 24GB RAM, Ubuntu 24.04 ARM64. Chosen specifically as a non-Railway option per user's request.
+- **vLLM:** stays local on the user's RTX 3050, exposed to the cloud-hosted API via a Cloudflare Tunnel (same pattern already used for Ollama on Lightning AI). Confirmed via research that Oracle's free tier has no GPU shapes — this wasn't a fallback, it was the only viable option given the constraint.
+- **SLM (Ollama):** stays on Lightning AI, unchanged.
+- **Frontend hosting:** not yet decided (Vercel/Netlify are the likely default given the React/Vite stack, not yet confirmed with the user).
 
----
+### Known gotchas for when this resumes (researched, not yet executed)
+- Oracle's free ARM capacity is regionally constrained — **"Out of Capacity" errors are common in high-demand regions** (e.g. US East) and can take hours; Frankfurt and Singapore typically provision within minutes. Given the user's location (India), Singapore is the recommended region for both availability and latency.
+- **"Home Region Trap":** the home region chosen at account setup is permanent for Always Free resources and cannot be changed later — must be chosen correctly the first time.
+- Postgres/Redis/Flower images are fine on ARM64 unchanged; the custom `api` and `worker` images (built from this repo's own Dockerfiles) need to be rebuilt for `linux/arm64` via `docker buildx`, not reused from the x86 Windows/WSL2 dev images.
+- Oracle ingress is blocked by default — VCN security list rules need explicit allow rules for the API port before the VM is reachable publicly.
+- The `scripts/migrate.ps1` hardcoded-array gotcha (see Step A above) applies directly here: a fresh Postgres volume on the Oracle VM needs every migration 001 through the latest applied in order, and PowerShell itself won't exist on the Linux VM, so the equivalent `psql`-based apply sequence needs to be run manually or via a Linux-equivalent script.
 
-## Test Suite — Current State
-
-All tests pass against the live Docker stack. Run with:
-
-```powershell
-$env:PYTHONPATH="."
-$env:SLM_ENDPOINT="http://localhost"   # dummy value — Settings() validates on import but worker uses .env
-$env:API_KEY="9f86d081884c7d659a2feaa0c55ad015"
-pytest scripts/test_document_detail_and_status.py scripts/test_review_queue.py scripts/test_route_ordering.py scripts/test_celery_chain.py scripts/test_failure_paths.py scripts/test_webhook_delivery.py -v -s
-```
-
-| Test | What it proves |
-|---|---|
-| `test_document_detail_and_status` | `GET /documents/{id}` and `GET /documents/{id}/status` return correct shapes |
-| `test_review_queue` | `GET /documents/review` surfaces flagged documents from real DB |
-| `test_route_ordering` | `/review` resolves to review handler, not `/{id}` |
-| `test_celery_chain` | Full pipeline end-to-end with real vLLM + real Ollama. Validates timing — expect ~5s extract, 30-140s validate |
-| `test_celery_chain_known_bad` | XFAIL — `boe.png` extracts at 1.0 confidence, no low-confidence fixture exists for real VLM |
-| `test_failure_paths` | Extraction failure path and webhook exhaustion (dead-letter) path |
-| `test_webhook_delivery` | Real retry/backoff — 3 POSTs (500, 500, 200), gaps 2s and 4s, DB confirms `webhook_attempts=3` |
-
-**Critical check for `test_celery_chain`:** If `validate_task duration` is under 10s, the SLM fell back to rule-only. Check worker logs for `403 Forbidden` or `Connection refused` on the Lightning AI URL.
+### Deliberately deferred
+Cloud deployment was not started today because deploying Phase 8.5's unfinished merge engine would mean debugging it on a remote machine instead of locally — strictly worse for iteration speed. **Recommended order when resuming: finish and verify Phase 8.5 completely (including the frontend rendering update for list/conflict fields), then move to Phase 9.**
 
 ---
 
-## Latency Profile (confirmed empirically)
+## Problems encountered today — full list
 
-| Stage | Duration |
-|---|---|
-| Classification (vLLM) | ~1-2s |
-| Extraction (vLLM) | ~2-3s |
-| Validation (SLM, invoice) | 30-140s depending on Lightning AI load |
-| Validation (SLM, BOE) | 25-50s |
-| Total pipeline | ~35-145s |
-
-This is why async design is mandatory — synchronous would mean the client waits 2+ minutes per document.
-
----
-
-## Smoke Test Results (June 22, 2026)
-
-| Fixture | Result | Notes |
-|---|---|---|
-| `sample_invoice.png` | ✅ completed, confidence=0.9625 | `po_number` correctly flagged null at 0.7 |
-| `boe.png` | ✅ completed, confidence=1.0 | All 5 fields clean |
-| `boe_corrupted_sbcess.png` | ✅ completed, confidence=0.88, requires_review=True | `sbcess` flagged at 0.4 — rule caught bad data |
-| `garbage.png` | ✅ failed | Correctly rejected as unknown document type |
+1. **CORS misconfiguration** blocking all browser-to-API calls (`X-API-Key` header forces a preflight FastAPI never answered). Fixed with `CORSMiddleware` + configurable `ALLOWED_ORIGINS`.
+2. **No general document-list endpoint existed.** Added `GET /documents`, following existing route-ordering and response-shape conventions.
+3. **PDF upload failed with 400 at the VLM classify step** — PDFs were never actually supported end-to-end despite being documented as an accepted upload type. Root cause: vLLM's multimodal endpoint requires image bytes, not PDF bytes.
+4. **Multi-page field layout is non-trivial** — fields split across page 1 / last page / many-middle-pages depending on field type, ruling out a "first/last page only" shortcut originally considered.
+5. **Migration runner is a hardcoded array, not auto-discovery** — `003_page_support.sql` required a manual array edit in `scripts/migrate.ps1` or it would have silently never run. Same risk applies to all future migrations and to the eventual Oracle deployment.
+6. **Migration idempotency gap** — initial `003_page_support.sql` lacked `IF NOT EXISTS`, would have errored on re-run. Fixed.
+7. **False alarm: empty per-page extraction rows.** Root-caused to a synthetic test PDF containing no real field data, not a code defect — caught and resolved via worker log inspection before being mistaken for a Step C bug.
+8. **Confidence-at-extraction-stage diagnostic.** Confirmed (not assumed) that `field_confidences.confidence` has never been populated at extraction time for any document — exclusively a `validate_task` output. Resolved a real ambiguity in the Step D design before it was built.
+9. **`requires_review` ownership ambiguity** across two pipeline stages (merge layer vs. `validate_task`) — resolved via explicit tradeoff discussion; user chose to let the merge layer set the flag directly, with a hard never-downgrade guarantee enforced in `validate_task`'s write.
+10. **Scalar field disagreement detection** — exact-string-match was considered and rejected in favor of normalized comparison (parsed dates/decimals, trimmed/case-folded strings), specifically to avoid false-positive conflicts from formatting differences (e.g. `"500"` vs `"500.00"`) flooding the review queue.
+11. **API route filtering for multi-page results:** `GET /documents/{id}` and other endpoints were fetching page 1 extractions instead of the merged result. Fixed by adding a `page_number IS NULL` filter to correctly target the final merged extraction row.
+12. **API serialization of list fields and conflicts:** List fields (like `quantity`, `unit_price`) were returned as stringified JSON, and the special `_conflicts` object was missing from the response. Fixed by updating `api/routes/documents.py` to safely parse stringified lists and directly extract the `_conflicts` object from the database's `extracted_json`.
+13. **Subfolder file upload crashes (`FileNotFoundError`):** Uploading folders via the frontend passed subfolder paths (e.g., `folder/file.pdf`), causing crashes because parent directories didn't exist. Fixed by adding `os.makedirs(os.path.dirname(file_path), exist_ok=True)` in the upload handler.
+14. **VLM Classification failures on dense invoices:** Complex, real-world supplier invoices (e.g., Mouser Electronics) were classified as "unknown" with low confidence. Fixed by updating the `classify` system prompt in `models/vlm_client.py` to explicitly describe these documents and list examples like electronics distributors.
+15. **VLM Token Limit Overflow (`400 Bad Request`):** Extraction failed on complex invoices because the input prompt plus generation tokens exceeded vLLM's `2048` max model context length limit. Fixed by removing redundant Pydantic schema injection from `vlm_client.py`'s `system_prompt` and significantly shortening `INVOICE_EXTRACTION_PROMPT` in `extractors/prompts/invoice_prompt.py`, reducing the total context to ~1564 tokens and enabling successful 200 OK extractions.
 
 ---
 
-## Operational Notes
+## Guiding principles reaffirmed today (consistent with prior sessions)
 
-### Every session checklist (Lightning AI)
-The `~/on_start.sh` script handles this automatically on session start. If for any reason Ollama is not working, verify:
-
-```bash
-ss -tlnp | grep 11434   # must show 0.0.0.0:11434, not 127.0.0.1
-curl http://localhost:11434/api/tags
-```
-
-If bound to `127.0.0.1`:
-```bash
-bash ~/on_start.sh
-```
-
-From Windows, verify public tunnel:
-```powershell
-Invoke-RestMethod -Uri "https://11434-01kvfdrbbe002xwhcqng7rhh8e.cloudspaces.litng.ai/api/tags"
-```
-
-A `403` from the public URL = binding is `127.0.0.1`. Do not chase the Ports panel UI — fix the binding first.
-
-### Applying migrations to a fresh Postgres volume
-```powershell
-.\scripts\migrate.ps1
-```
-
-Safe to run on an already-migrated DB — idempotent.
-
-### Starting the stack
-```powershell
-docker-compose up -d
-docker-compose ps   # confirm all 6 services running
-```
+- **A self-reported "done" is not evidence.** Every step in today's session required real query output, real log lines, or real file listings before being accepted — and this caught at least one genuine gap (Step C's first round, where prose claimed success but the actual `field_confidences` rows were empty) and one false alarm correctly resolved by going to the evidence (the synthetic-PDF root cause).
+- **Small, isolated, separately-verified steps** — explicitly chosen by the user over one large prompt, specifically because of this project's history with silent failures. This paid off directly: Step C's bug was caught before it could be built on top of in Step D.
+- **Never let a later stage silently undo an earlier stage's correct decision** — the `requires_review` never-downgrade rule is the clearest expression of this principle applied to today's new code.
 
 ---
 
-## What's Next
+## Immediate next steps, in order
 
-### Phase 8 — Frontend
-Build a UI that talks to the API. Contract is in `docs/API.md`.
-
-**Key flows the frontend needs to handle:**
-- File upload (`POST /documents`) with API key header
-- Status polling (`GET /documents/{id}/status`) — pipeline takes 35-145s, frontend must poll or use webhook
-- Document detail view (`GET /documents/{id}`) — show extracted fields, confidence scores, flags
-- Review queue (`GET /documents/review`) — list flagged documents for human review, support filters by doc_type and date range
-- Error states — `status: failed` with `failure_reason`
-
-**Auth:** Include `X-API-Key: <key>` header on all `/documents` requests. `/health` does not require auth.
-
-**Suggested tech:** Any — React, Vue, plain HTML. The API is REST+JSON, no special requirements.
-
-### Phase 9 — Cloud Deployment
-Move the Docker Compose stack from localhost to a real server.
-
-**What needs to change:**
-- Choose a cloud provider (AWS, GCP, DigitalOcean, etc.)
-- Set up a VM with Docker and Docker Compose
-- Copy the stack and `.env` to the server
-- Update `docs/API.md` base URL to the real public URL
-- Add API key auth to any public-facing reverse proxy (nginx)
-- Decide on document storage — currently files are written to local `/uploads`, needs a persistent volume or object storage (S3/GCS) for production
-- Migrate Lightning AI Ollama to a persistent VM — the current Lightning AI setup is fine for development but has no uptime guarantee
-
-**Open question:** Keep self-hosting Ollama on a GPU VM, or switch to a hosted model API for SLM validation? Hosted API (e.g. Together AI, Groq) eliminates the Lightning AI dependency entirely and gives predictable latency — worth evaluating before committing to a GPU VM.
-
----
-
-## Guiding Principles (established across all phases)
-
-- **A PASSED test is not evidence — timing, logs, and DB state are evidence.** A validate_task finishing in 3s when the real SLM takes 30-90s is a failed test that reported green.
-- **Shared helpers never live in `tasks/`** — they go in `core/`. Tasks may import from `core/`, never from each other.
-- **Explicit imports over autodiscovery** — `core/celery_app.py` imports tasks explicitly. Autodiscovery failed inside Docker and was abandoned.
-- **Inter-container URLs use the Compose service name, never `localhost`** — applies to DATABASE_URL, REDIS_URL, and any future service URL.
-- **Docker Compose shell env vars override `.env` file values** — always check `docker-compose exec <service> env` when a container is using unexpected values.
-- **PowerShell `curl` is `Invoke-WebRequest`, not real curl** — use `Invoke-RestMethod` with PowerShell-native syntax.
-- **A 403 from Lightning AI's public URL = binding reversion, not an access control issue** — check `ss -tlnp | grep 11434` before investigating anything else.
+1. **Review Step D's verification output** (7 checks specified in the Step D prompt) once Antigravity returns it. Do not proceed to frontend rendering work until this is confirmed with real evidence, per the pattern established today.
+2. **Update `DocumentDetail.jsx`** to correctly render list-valued fields (`quantity`/`unit_price` as page-attributed arrays) and conflict data (`_conflicts`), once Step D is verified.
+3. **Test a multi-page BOE fixture** — confirm the document-type-agnostic merge engine actually handles BOE's field layout correctly, not just invoice's.
+4. **Resume Phase 9 (Oracle Cloud deployment)** only after the above are complete — provision the Singapore-region `VM.Standard.A1.Flex` instance, rebuild `api`/`worker` images for ARM64, set up the Cloudflare Tunnel for local vLLM, and run the full migration sequence (001–003+) against the fresh Postgres volume.
