@@ -58,6 +58,20 @@ export default function DocumentDetail({ documentId }) {
   }
 
   const { status, failed_stage, failure_reason, extraction_result, file_name, document_type, created_at } = doc;
+  
+  let regularFields = [];
+  let conflicts = null;
+  let lineItems = extraction_result?.line_items || [];
+  
+  if (extraction_result && extraction_result.fields) {
+    regularFields = extraction_result.fields.filter(f => f.field_name !== '_conflicts');
+    const conflictsField = extraction_result.fields.find(f => f.field_name === '_conflicts');
+    conflicts = conflictsField?.value ?? null;
+
+    if (lineItems.length > 0) {
+      regularFields = regularFields.filter(f => f.field_name !== 'quantity' && f.field_name !== 'unit_price');
+    }
+  }
 
   return (
     <div className="document-detail">
@@ -97,7 +111,7 @@ export default function DocumentDetail({ documentId }) {
             {extraction_result.requires_review && (
               <div className="card alert-card">
                 <h4>Manual Review Required</h4>
-                <p>Some fields have low confidence or failed validation.</p>
+                <p>Some fields have low confidence, failed validation, or conflicting values across pages.</p>
               </div>
             )}
           </div>
@@ -114,10 +128,20 @@ export default function DocumentDetail({ documentId }) {
                 </tr>
               </thead>
               <tbody>
-                {extraction_result.fields.map((field, idx) => (
+                {regularFields.map((field, idx) => (
                   <tr key={idx} className={field.flag ? 'flagged-row' : ''}>
                     <td>{formatFieldName(field.field_name)}</td>
-                    <td>{field.value}</td>
+                    <td>
+                      {Array.isArray(field.value) ? (
+                        field.value.map((p, i) => (
+                          <div key={i} className="page-value-line">
+                            Page {p.page}: {p.value}
+                          </div>
+                        ))
+                      ) : (
+                        field.value
+                      )}
+                    </td>
                     <td>{field.confidence !== null ? `${(field.confidence * 100).toFixed(1)}%` : '—'}</td>
                     <td>{field.flag || '—'}</td>
                   </tr>
@@ -125,6 +149,52 @@ export default function DocumentDetail({ documentId }) {
               </tbody>
             </table>
           </div>
+
+          {lineItems && lineItems.length > 0 && (
+            <div className="fields-table-container line-items-container" style={{marginTop: '2rem'}}>
+              <h3>Line Items</h3>
+              <table className="fields-table line-items-table">
+                <thead>
+                  <tr>
+                    <th>Description</th>
+                    <th>Product Code</th>
+                    <th>Quantity</th>
+                    <th>Unit Price</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lineItems.map((item, idx) => (
+                    <tr key={idx}>
+                      <td>{item.description || '—'}</td>
+                      <td>{item.product_code || '—'}</td>
+                      <td>{item.quantity !== null && item.quantity !== undefined ? item.quantity : '—'}</td>
+                      <td>{item.unit_price !== null && item.unit_price !== undefined ? item.unit_price : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {conflicts && Object.keys(conflicts).length > 0 && (
+            <div className="conflicts-section">
+              <h3>⚠ Merge Conflicts — Manual Review Required</h3>
+              <p className="conflicts-note">
+                These fields returned different values across pages. The document has been flagged for review.
+              </p>
+              {Object.entries(conflicts).map(([fieldName, pages]) => (
+                <div key={fieldName} className="conflict-block">
+                  <div className="conflict-field-name">{formatFieldName(fieldName)}</div>
+                  {pages.map((p, i) => (
+                    <div key={i} className="conflict-page-line">
+                      <span className="conflict-page-label">Page {p.page}</span>
+                      <span className="conflict-page-value">{p.value}</span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

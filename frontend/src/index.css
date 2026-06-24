@@ -448,3 +448,57 @@ body {
 .flagged-row td:first-child {
   border-left: 3px solid var(--warning);
 }
+
+.page-value-line {
+  font-size: 0.85rem;
+  color: var(--text-secondary, #555);
+  line-height: 1.6;
+}
+
+.conflicts-section {
+  margin-top: 1.5rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid #f59e0b;
+  border-radius: 6px;
+  background: #fffbeb;
+}
+
+.conflicts-section h3 {
+  margin: 0 0 0.4rem 0;
+  font-size: 1rem;
+  color: #b45309;
+}
+
+.conflicts-note {
+  margin: 0 0 1rem 0;
+  font-size: 0.85rem;
+  color: #92400e;
+}
+
+.conflict-block {
+  margin-bottom: 1rem;
+}
+
+.conflict-field-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  margin-bottom: 0.25rem;
+  color: #78350f;
+}
+
+.conflict-page-line {
+  display: flex;
+  gap: 0.75rem;
+  font-size: 0.85rem;
+  padding: 0.15rem 0;
+}
+
+.conflict-page-label {
+  color: #92400e;
+  font-weight: 500;
+  min-width: 50px;
+}
+
+.conflict-page-value {
+  color: #1c1917;
+}
