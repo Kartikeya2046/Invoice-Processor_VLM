@@ -18,27 +18,27 @@ def validate_invoice_rules(invoice: InvoiceSchema) -> List[FieldConfidence]:
     else:
         results.append(FieldConfidence(field_name="invoice_date", value=val, confidence=0.7, flag="field is null"))
 
-    # quantity
-    val = invoice.quantity
-    processed_fields.add("quantity")
-    if val is not None:
-        if val > 0:
-            results.append(FieldConfidence(field_name="quantity", value=val, confidence=1.0))
-        else:
-            results.append(FieldConfidence(field_name="quantity", value=val, confidence=0.0, flag="quantity must be positive"))
+    # line_items
+    processed_fields.add("line_items")
+    line_items = invoice.line_items
+    if line_items is not None and len(line_items) > 0:
+        all_valid = True
+        for idx, item in enumerate(line_items):
+            qty = item.quantity
+            if qty is not None and qty <= 0:
+                results.append(FieldConfidence(field_name=f"line_items[{idx}].quantity", value=qty, confidence=0.0, flag="quantity must be positive"))
+                all_valid = False
+            
+            price = item.unit_price
+            if price is not None and price <= 0:
+                results.append(FieldConfidence(field_name=f"line_items[{idx}].unit_price", value=price, confidence=0.0, flag="unit_price must be positive"))
+                all_valid = False
+        
+        if all_valid:
+            # Pydantic serializes lists to lists of dicts if we just dump, but value can just be the object
+            results.append(FieldConfidence(field_name="line_items", value=str(line_items), confidence=1.0))
     else:
-        results.append(FieldConfidence(field_name="quantity", value=val, confidence=1.0))
-
-    # unit_price
-    val = invoice.unit_price
-    processed_fields.add("unit_price")
-    if val is not None:
-        if val > 0:
-            results.append(FieldConfidence(field_name="unit_price", value=val, confidence=1.0))
-        else:
-            results.append(FieldConfidence(field_name="unit_price", value=val, confidence=0.0, flag="unit_price must be positive"))
-    else:
-        results.append(FieldConfidence(field_name="unit_price", value=val, confidence=1.0))
+        results.append(FieldConfidence(field_name="line_items", value="[]", confidence=0.7, flag="no line items found"))
 
     # cgst / sgst
     processed_fields.add("cgst")
