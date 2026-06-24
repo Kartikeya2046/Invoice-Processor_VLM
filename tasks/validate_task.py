@@ -17,6 +17,13 @@ logger = logging.getLogger(__name__)
 async def save_validation_results_async(document_id: str, extraction_id: str, validation_result):
     conn = await asyncpg.connect(get_db_url())
     try:
+        # Read existing requires_review (e.g. set by merge step due to page conflicts)
+        existing_row = await conn.fetchrow("SELECT requires_review FROM extractions WHERE id = $1", extraction_id)
+        existing_requires_review = existing_row["requires_review"] if existing_row and existing_row["requires_review"] is not None else False
+        
+        # A merge-detected page conflict must never be silently cleared by validate_task's own conclusion.
+        final_requires_review = existing_requires_review or validation_result.requires_review
+        
         await conn.execute(
             """
             UPDATE extractions 
@@ -24,7 +31,7 @@ async def save_validation_results_async(document_id: str, extraction_id: str, va
             WHERE id = $3
             """,
             validation_result.overall_confidence,
-            validation_result.requires_review,
+            final_requires_review,
             extraction_id
         )
         

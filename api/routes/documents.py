@@ -40,7 +40,23 @@ async def upload_document(
     with open(file_path, "wb") as f:
         f.write(file_bytes)
         
+    page_count = 1
+    page_image_paths = [file_path]
+    
+    if file.content_type == "application/pdf" or file.filename.lower().endswith(".pdf"):
+        from core.pdf_utils import render_pdf_to_images
+        try:
+            page_image_paths = render_pdf_to_images(file_path, UPLOAD_DIR)
+            page_count = len(page_image_paths)
+            if page_count == 0:
+                raise Exception("PDF rendered 0 pages")
+        except Exception as e:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            raise HTTPException(status_code=400, detail=f"Failed to process PDF: {str(e)}. File may be corrupt or invalid.")
+        
     # Insert to db
+    import json
     db_url = get_db_url()
     conn = await asyncpg.connect(db_url)
     try:
@@ -51,6 +67,13 @@ async def upload_document(
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             """,
             doc_id, job_id, file_path, file.filename, len(file_bytes), file.content_type, 'default', 'pending', callback_url
+        )
+        await conn.execute(
+            """
+            INSERT INTO processing_metadata (document_id, page_count, page_image_paths)
+            VALUES ($1, $2, $3)
+            """,
+            doc_id, page_count, json.dumps(page_image_paths)
         )
     finally:
         await conn.close()

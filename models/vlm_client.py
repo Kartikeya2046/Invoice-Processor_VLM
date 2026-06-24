@@ -96,8 +96,17 @@ class VLMClient:
 
     async def classify(self, image_b64: str, mime_type: str = "image/png") -> dict:
         system_prompt = (
-            'Classify this document. Return ONLY valid JSON: {"document_type": "invoice", "confidence": 0.95} '
-            'where document_type is one of: invoice, bill_of_entry, unknown'
+            'You are a document classification expert. Classify the document image into one of these types:\n'
+            '- "invoice": Any commercial invoice, supplier invoice, purchase invoice, tax invoice, or sales invoice. '
+            'This includes supplier invoices with part numbers, component listings, order tables, itemized charges, '
+            'shipping details, and payment terms. Common suppliers include electronics distributors (Mouser, Digi-Key, '
+            'RS Components, Arrow), manufacturers, and any vendor billing for goods or services. '
+            'Key indicators: invoice number, date, supplier name, bill-to/ship-to address, line items with quantities '
+            'and prices, subtotal, taxes (GST, VAT, CGST, SGST), and total amount due.\n'
+            '- "bill_of_entry": A customs document filed for imported goods. '
+            'Key indicators: BE number, port of entry, importer details, HS codes, assessed value, customs duty.\n'
+            '- "unknown": Use only if the document clearly does not match either type above.\n\n'
+            'Return ONLY valid JSON with no explanation: {"document_type": "invoice", "confidence": 0.95}'
         )
         messages = [
             {"role": "system", "content": system_prompt},
@@ -128,10 +137,7 @@ class VLMClient:
             raise VLMClientError(f"Failed to parse classification JSON. Raw response: {content}") from e
 
     async def extract(self, image_b64: str, prompt: str, schema: str, mime_type: str = "image/png") -> str:
-        system_prompt = (
-            f"You are a strict data extraction system. Extract information according to the following schema:\n{schema}\n"
-            "Return ONLY valid JSON matching this schema."
-        )
+        system_prompt = "You are a strict data extraction system. Return ONLY valid JSON."
         
         messages = [
             {"role": "system", "content": system_prompt},
@@ -148,9 +154,9 @@ class VLMClient:
             "model": MODEL_NAME,
             "messages": messages,
             "temperature": 0.1,
-            # Deliberately conservative because max_model_len is only 2048 total and the image encoder budget 
+            # Deliberately conservative because max_model_len is only 4096 total and the image encoder budget 
             # can consume most of it. This should be tuned upward only after confirming real prompt-token counts.
-            "max_tokens": 512 
+            "max_tokens": 1024 
         }
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
